@@ -1,25 +1,44 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"text/template"
 	"time"
 
 	"github.com/go-co-op/gocron"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/uptrace/opentelemetry-go-extra/otelsql"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/contrib/propagators/b3"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	"go.opentelemetry.io/otel/sdk/trace"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 )
 
 var templates = template.Must(template.ParseGlob("views/**/*"))
+var traceContext propagation.TraceContext
 
 func DBConnection(r *http.Request) *sql.DB {
 	DatabasePath := "database.db"
 
-	db, err := sql.Open("sqlite3", DatabasePath)
+	db, err := otelsql.Open("sqlite3", DatabasePath,
+		otelsql.WithAttributes(semconv.DBSystemSqlite),
+		otelsql.WithDBName("blog-service-db"),
+		otelsql.WithTracerProvider(otel.GetTracerProvider()))
 
 	if err != nil {
 		panic(err)
@@ -48,20 +67,136 @@ func runCron() {
 	scheduler.StartAsync()
 }
 
+func initSdtout() *sdktrace.TracerProvider {
+
+	// Create stdout exporter to be able to retrieve
+	// the collected spans.
+	exporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Create a new trace provider instance.
+	tp := sdktrace.NewTracerProvider(
+		// Always be sure to batch in production.
+		sdktrace.WithBatcher(exporter),
+	)
+
+	// Set the TracerProvider as global default to ensure all traces from
+	// the same process are sent to the same backend.
+	otel.SetTracerProvider(tp)
+
+	otel.SetTextMapPropagator(
+		propagation.NewCompositeTextMapPropagator(
+			b3.New(),
+			propagation.TraceContext{},
+			propagation.Baggage{},
+		),
+	)
+
+	fmt.Println("Tracer initialized")
+
+	return tp
+}
+
+func getTracerConfig() map[string]interface{} {
+	serviceName := os.Getenv("OTEL_SERVICE_NAME")
+	if serviceName == "" {
+		serviceName = "blog-service-otel"
+	}
+
+	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	if endpoint == "" {
+		log.Fatal("OTEL_EXPORTER_OTLP_ENDPOINT environment variable not set")
+	}
+
+	headerString := os.Getenv("OTEL_EXPORTER_OTLP_HEADERS")
+
+	headers := map[string]string{}
+
+	if headerString != "" {
+		for _, header := range strings.Split(headerString, ",") {
+			parts := strings.Split(header, "=")
+			if len(parts) != 2 {
+				log.Fatalf("invalid header %q", header)
+			}
+			headers[parts[0]] = parts[1]
+		}
+	}
+
+	return map[string]interface{}{
+		"OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
+		"OTEL_EXPORTER_OTLP_HEADERS":  headers,
+		"OTEL_SERVICE_NAME":           serviceName,
+	}
+}
+
 func main() {
+	env := getTracerConfig()
+
+	ctx := context.Background()
+
+	url := env["OTEL_EXPORTER_OTLP_ENDPOINT"].(string)
+	headers := env["OTEL_EXPORTER_OTLP_HEADERS"].(map[string]string)
+
+	fmt.Println(url)
+	fmt.Println(headers)
+	fmt.Println(env["OTEL_SERVICE_NAME"].(string))
+	client := otlptracegrpc.NewClient(
+		otlptracegrpc.WithEndpoint(url),
+		otlptracegrpc.WithHeaders(headers),
+	)
+
+	exp, err := otlptrace.New(ctx, client)
+	if err != nil {
+		log.Fatalf("failed to create exporter: %v", err)
+	}
+
+	tp := trace.NewTracerProvider(
+		trace.WithSampler(trace.AlwaysSample()),
+		trace.WithBatcher(exp),
+		trace.WithResource(
+			resource.NewWithAttributes(
+				semconv.SchemaURL,
+				semconv.ServiceNameKey.String(env["OTEL_SERVICE_NAME"].(string)),
+				attribute.String("service.type", "go"),
+			),
+		),
+	)
+
+	defer func() {
+		if err := tp.Shutdown(ctx); err != nil {
+			log.Printf("error shutting down tracer provider: %v", err)
+		}
+		if err := exp.Shutdown(ctx); err != nil {
+			log.Printf("error shutting down exporter: %v", err)
+		}
+	}()
+
+	otel.SetTracerProvider(tp)
+
+	otel.SetTextMapPropagator(
+		propagation.NewCompositeTextMapPropagator(
+			propagation.Baggage{},
+			propagation.TraceContext{},
+		),
+	)
+
+	fmt.Println("Tracer initialized")
+
 	runCron()
 
 	mux := http.NewServeMux()
 
-	mux.Handle("/", http.HandlerFunc(Home))
-	mux.Handle("/show", http.HandlerFunc(Show))
-	mux.Handle("/create", http.HandlerFunc(Create))
-	mux.Handle("/store", http.HandlerFunc(Store))
-	mux.Handle("/edit", http.HandlerFunc(Edit))
-	mux.Handle("/update", http.HandlerFunc(Update))
-	mux.Handle("/delete", http.HandlerFunc(Delete))
+	mux.Handle("/", otelhttp.NewHandler(http.HandlerFunc(Home), "Home", otelhttp.WithTracerProvider(tp), otelhttp.WithServerName("home")))
+	mux.Handle("/show", otelhttp.NewHandler(http.HandlerFunc(Show), "Show", otelhttp.WithTracerProvider(tp), otelhttp.WithServerName("show")))
+	mux.Handle("/create", otelhttp.NewHandler(http.HandlerFunc(Create), "Create", otelhttp.WithTracerProvider(tp), otelhttp.WithServerName("create")))
+	mux.Handle("/store", otelhttp.NewHandler(http.HandlerFunc(Store), "Store", otelhttp.WithTracerProvider(tp), otelhttp.WithServerName("store")))
+	mux.Handle("/edit", otelhttp.NewHandler(http.HandlerFunc(Edit), "Edit", otelhttp.WithTracerProvider(tp), otelhttp.WithServerName("edit")))
+	mux.Handle("/update", otelhttp.NewHandler(http.HandlerFunc(Update), "Update", otelhttp.WithTracerProvider(tp), otelhttp.WithServerName("update")))
+	mux.Handle("/delete", otelhttp.NewHandler(http.HandlerFunc(Delete), "Delete", otelhttp.WithTracerProvider(tp), otelhttp.WithServerName("delete")))
 
-	mux.Handle("/generate", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/generate", otelhttp.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		status, err := GetRandomText(*r)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -71,7 +206,7 @@ func main() {
 
 		w.Write([]byte(status))
 
-	}))
+	}), "Random", otelhttp.WithTracerProvider(tp), otelhttp.WithServerName("generate")))
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -279,8 +414,8 @@ func GetAnalyzerURL() string {
 func AnalyzeText(r http.Request, str string) (string, error) {
 	url := GetAnalyzerURL() + "/analyze?text=" + url.QueryEscape(str)
 
-	resp, err := http.Get(url)
-
+	requestClone := r.Clone(r.Context())
+	resp, err := otelhttp.Get(requestClone.Context(), url)
 	if err != nil {
 		return "", err
 	}
@@ -296,7 +431,8 @@ func AnalyzeText(r http.Request, str string) (string, error) {
 func WriteText(r http.Request, str string) (string, error) {
 	url := GetAnalyzerURL() + "/write?key=" + os.Getenv("SECRET_KEY") + "&text=" + url.QueryEscape(str)
 
-	resp, err := http.Get(url)
+	requestClone := r.Clone(r.Context())
+	resp, err := otelhttp.Get(requestClone.Context(), url)
 	if err != nil {
 		return "", err
 	}
@@ -309,7 +445,8 @@ func WriteText(r http.Request, str string) (string, error) {
 func GetRandomText(r http.Request) (string, error) {
 	url := GetAnalyzerURL() + "/random"
 
-	resp, err := http.Get(url)
+	requestClone := r.Clone(r.Context())
+	resp, err := otelhttp.Get(requestClone.Context(), url)
 	if err != nil {
 		return "", err
 	}

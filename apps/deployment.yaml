@@ -31,6 +31,10 @@ spec:
               value: blog-service
             - name: ANALYZER_URL
               value: http://text-analyze-svc:3000
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: otel-collector.opentelemetry-operator-system:4317
+            - name: OTEL_EXPORTER_OTLP_INSECURE
+              value: "true"
 ---
 
 apiVersion: apps/v1
@@ -64,6 +68,10 @@ spec:
           env:
             - name: APP_PATH
               value: text-analyze-service
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: otel-collector.opentelemetry-operator-system:4317
+            - name: OTEL_EXPORTER_OTLP_INSECURE
+              value: "true"
 ---
 
 apiVersion: v1
