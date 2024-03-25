@@ -2,10 +2,8 @@ package main
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"log"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -48,14 +46,6 @@ func runCron() {
 	scheduler := gocron.NewScheduler(time.UTC)
 	scheduler.Every(5).Minute().Do(deleteOldPosts)
 	scheduler.StartAsync()
-}
-
-func throwRandomError() error {
-	rand := rand.Intn(10)
-	if rand < 3 {
-		panic(GetRandomError())
-	}
-	return nil
 }
 
 func main() {
@@ -167,7 +157,6 @@ func Show(w http.ResponseWriter, r *http.Request) {
 	templates.ExecuteTemplate(w, "show", post)
 }
 func Create(w http.ResponseWriter, r *http.Request) {
-	throwRandomError()
 	templates.ExecuteTemplate(w, "create", nil)
 }
 func Store(w http.ResponseWriter, r *http.Request) {
@@ -277,44 +266,6 @@ func FormatDate(date string) string {
 	layout := "2006-01-02 15:04:05"
 	t, _ := time.Parse(layout, date)
 	return t.Format("January 2, 2006")
-}
-
-func GetServerError() error {
-	return errors.New("Server is down!")
-}
-
-func GetDatabaseError() error {
-	return errors.New("Database is down!")
-}
-
-func GetMemoryOverflowError() error {
-	return errors.New("Memory is full!")
-}
-
-func GetNetworkError() error {
-	return errors.New("Network is not available!")
-}
-
-func GetDiskError() error {
-	return errors.New("Disk is full!")
-}
-
-func GetRandomError() error {
-	rand := rand.Intn(5)
-	switch rand {
-	case 0:
-		return GetServerError()
-	case 1:
-		return GetDatabaseError()
-	case 2:
-		return GetMemoryOverflowError()
-	case 3:
-		return GetNetworkError()
-	case 4:
-		return GetDiskError()
-	default:
-		return GetServerError()
-	}
 }
 
 func GetAnalyzerURL() string {
