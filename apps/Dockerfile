@@ -1,4 +1,4 @@
-FROM golang:1.22.1-bullseye
+FROM golang:1.20.1-bullseye
 RUN mkdir -p /app
 COPY ../src/ /app/src
 WORKDIR /app/src
