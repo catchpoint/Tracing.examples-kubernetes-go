@@ -10,4 +10,8 @@ spec:
     - baggage
   sampler:
     type: always_on
-    
+
+  go:
+    env:
+      - name: OTEL_GO_AUTO_INCLUDE_DB_STATEMENT
+        value: 'true'
