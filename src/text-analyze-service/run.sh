@@ -1,0 +1,1 @@
+SECRET_KEY=go-trace-secret TEXT_ANALYZER_SERVICE_PORT=3000 ./app

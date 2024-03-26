@@ -1,0 +1,17 @@
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: otel-instrumentation
+spec:
+  exporter:
+    endpoint: http://otel-collector.opentelemetry-operator-system:4318
+  propagators:
+    - tracecontext
+    - baggage
+  sampler:
+    type: always_on
+
+  go:
+    env:
+      - name: OTEL_GO_AUTO_INCLUDE_DB_STATEMENT
+        value: 'true'
